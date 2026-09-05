@@ -1,3 +1,4 @@
+id,day,type,account,currency,amount,value_date,auth_id,ref_event,instalment_count
 E1,1,CREDIT,ACC-001,AED,1200.00,1,,,0
 E2,1,DEBIT,ACC-001,AED,950.00,1,,,0
 E3,2,AUTHORIZATION,ACC-001,AED,200.00,2,Auth-A,,0

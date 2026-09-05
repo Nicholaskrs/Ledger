@@ -2,7 +2,9 @@ package ledger
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -25,8 +27,18 @@ func ParseCSVRecords[T any](filePath string, parseFn func(record []string) (T, e
 	}(file)
 
 	reader := csv.NewReader(file)
+
+	// Skip the header row. If the file is empty, that's an error worth
+	// surfacing distinctly rather than silently returning an empty result.
+	if _, err := reader.Read(); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("file %s is empty, no header row found", filePath)
+		}
+		return nil, fmt.Errorf("error reading header row of %s: %w", filePath, err)
+	}
+
 	var result []T
-	rowIndex := 0
+	rowIndex := 1
 
 	for {
 		record, err := reader.Read()
