@@ -92,14 +92,17 @@ type ReplayError struct {
 // Precision is the number of decimal places for its currency (2 for AED,
 // 3 for BHD, etc...) — see NUMBERS.md #2.
 type Account struct {
-	ID             string
-	Currency       string
-	Precision      int
-	Ledger         []LedgerEntry         // append-only, never mutated or truncated
-	Holds          map[string]*Hold      // keyed by AuthID
-	Errors         map[int][]ReplayError // rejected events referencing this account
-	DailyRawMicros map[int]int64         // Total Daily in Raw Micros
-	FeesAssessed   map[int][]LedgerEntry
+	ID                  string
+	Currency            string
+	Precision           int
+	Ledger              []LedgerEntry         // append-only, never mutated or truncated
+	Holds               map[string]*Hold      // keyed by AuthID
+	Errors              map[int][]ReplayError // rejected events referencing this account
+	DailyRawMicros      map[int]int64         // Total Daily in Raw Micros
+	FeesAssessed        map[int][]LedgerEntry
+	Balance             int64         // running ledger balance — kept in sync on every insert
+	ActiveHoldsTotal    int64         // running sum of active holds — kept in sync on create/resolve
+	PendingBalanceByDay map[int]int64 // value_date -> amount not yet folded into Balance
 }
 
 // NewAccount creates an account with an explicit opening balance entry,
@@ -108,34 +111,22 @@ type Account struct {
 // NewAccount creates an account with a given opening balance.
 func NewAccount(id, currency string, precision int, openingBalanceMinorUnits int64) *Account {
 	return &Account{
-		ID:             id,
-		Currency:       currency,
-		Precision:      precision,
-		Ledger:         make([]LedgerEntry, 0),
-		Holds:          make(map[string]*Hold),
-		Errors:         make(map[int][]ReplayError),
-		DailyRawMicros: make(map[int]int64),
-		FeesAssessed:   make(map[int][]LedgerEntry),
+		ID:                  id,
+		Currency:            currency,
+		Precision:           precision,
+		Ledger:              make([]LedgerEntry, 0),
+		Holds:               make(map[string]*Hold),
+		Errors:              make(map[int][]ReplayError),
+		DailyRawMicros:      make(map[int]int64),
+		FeesAssessed:        make(map[int][]LedgerEntry),
+		Balance:             openingBalanceMinorUnits,
+		PendingBalanceByDay: make(map[int]int64),
 	}
-}
-
-// ClosingBalance returns the ledger balance as of the given day, computed
-// by summing every LedgerEntry with ValueDate <= day. This is always
-// recomputed, never cached, because backdated entries can
-// change historical days' balances after the fact. See AMBIGUITIES.md #2.
-func (a *Account) ClosingBalance(day int) int64 {
-	var total int64
-	for _, e := range a.Ledger {
-		if e.ValueDate <= day {
-			total += e.Amount
-		}
-	}
-	return total
 }
 
 // AvailableBalance returns ledger balance minus all currently active holds.
-func (a *Account) AvailableBalance(day int) int64 {
-	total := a.ClosingBalance(day)
+func (a *Account) AvailableBalance() int64 {
+	total := a.Balance
 	for _, h := range a.Holds {
 		if h.Active {
 			total -= h.Amount

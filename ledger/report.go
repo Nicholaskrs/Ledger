@@ -75,15 +75,15 @@ func PrintDayReports(reports map[string]DayReport) error {
 // e.Replay(events) has returned — capitalizeInterest only runs at the very
 // end of Replay, so calling this mid-replay will always show
 // InterestCapitalized as 0.
-func (e *Engine) generateSummaryReport(day int) map[string]SummaryReport {
+func (e *Engine) generateSummaryReport() map[string]SummaryReport {
 	result := make(map[string]SummaryReport)
 
 	for id, account := range e.Accounts {
 		s := SummaryReport{
 			Account:               account.ID,
 			Currency:              account.Currency,
-			FinalClosingBalance:   account.ClosingBalance(day),
-			FinalAvailableBalance: account.AvailableBalance(day),
+			FinalClosingBalance:   account.Balance,
+			FinalAvailableBalance: account.AvailableBalance(),
 		}
 
 		for _, entry := range account.Ledger {
