@@ -39,6 +39,7 @@ func (e *Engine) Replay(events []Event) {
 		}
 		e.recomputeFees(day)
 		e.recomputeAccruals(day)
+		e.drainPending(day)
 		dailyReports := e.generateDayReport(day)
 		err := PrintDayReports(dailyReports)
 		if err != nil {
@@ -47,7 +48,7 @@ func (e *Engine) Replay(events []Event) {
 	}
 	lastDay := days[len(days)-1]
 	e.capitalizeInterest(lastDay)
-	summaryReport := e.generateSummaryReport(lastDay)
+	summaryReport := e.generateSummaryReport()
 	err := PrintSummaryReports(summaryReport)
 	if err != nil {
 		panic(err)
@@ -78,18 +79,13 @@ func (e *Engine) applyEvent(ev Event) {
 }
 
 func (e *Engine) processAuthorization(acc *Account, ev Event) {
-	activeHolds := int64(0)
-	for _, h := range acc.Holds {
-		if h.Active {
-			activeHolds += h.Amount
-		}
-	}
-	availableAmount := acc.ClosingBalance(ev.Day) - activeHolds
+	availableAmount := acc.Balance - acc.ActiveHoldsTotal
 
 	if availableAmount >= ev.Amount {
 		acc.Holds[ev.AuthID] = &Hold{
 			AuthID: ev.AuthID, Amount: ev.Amount, CreatedOn: ev.Day, Active: true,
 		}
+		acc.ActiveHoldsTotal += ev.Amount
 		return
 	}
 	acc.Errors[ev.Day] = append(acc.Errors[ev.Day], ReplayError{
@@ -131,6 +127,8 @@ func (e *Engine) processSettlement(acc *Account, ev Event) {
 		Account: acc.ID, Amount: -ev.Amount, ValueDate: ev.ValueDate,
 		RelatesTo: []string{ev.AuthID},
 	})
+	acc.Balance -= ev.Amount
+	acc.ActiveHoldsTotal -= hold.Amount
 	hold.Active = false // release the hold regardless of settled amount vs held amount
 }
 
@@ -155,6 +153,7 @@ func (e *Engine) processReversal(acc *Account, ev Event) {
 		Account: acc.ID, Amount: -original.Amount, ValueDate: ev.ValueDate,
 		RelatesTo: []string{ev.RefEvent},
 	})
+	acc.Balance -= original.Amount
 }
 
 func (e *Engine) processInstalmentCredit(ev Event, acc *Account) {
@@ -179,12 +178,18 @@ func (e *Engine) processInstalmentCredit(ev Event, acc *Account) {
 			InstalmentSeq:   i + 1,
 			InstalmentTotal: len(parts),
 		})
+		if vd <= ev.Day {
+			acc.Balance += amt // already effective as of today's replay day
+			continue
+		}
+		acc.PendingBalanceByDay[vd] += amt
+
 	}
 }
 
 func (e *Engine) recomputeFees(day int) {
 	for _, acc := range e.Accounts {
-		if acc.ClosingBalance(day) < 0 {
+		if acc.Balance < 0 {
 			feeID := fmt.Sprintf("SYS-FEE-%s-D%d", acc.ID, day)
 			if acc.HasLedgerEntry(feeID) {
 				continue // already assessed for this day — append-only, don't duplicate
@@ -197,13 +202,14 @@ func (e *Engine) recomputeFees(day int) {
 			}
 			acc.Ledger = append(acc.Ledger, ledgerEntry)
 			acc.FeesAssessed[day] = append(acc.FeesAssessed[day], ledgerEntry)
+			acc.Balance -= OverdraftFeeAED
 		}
 	}
 }
 
 func (e *Engine) recomputeAccruals(day int) {
 	for _, acc := range e.Accounts {
-		acc.DailyRawMicros[day] = e.rawDailyInterestMicros(acc.ClosingBalance(day))
+		acc.DailyRawMicros[day] = e.rawDailyInterestMicros(acc.Balance)
 	}
 }
 
@@ -216,6 +222,7 @@ func (e *Engine) processCredit(ev Event, acc *Account) {
 		EventID: ev.ID, Type: TypeCredit, Source: SourceInput,
 		Account: acc.ID, Amount: ev.Amount, ValueDate: ev.ValueDate,
 	})
+	acc.Balance += ev.Amount
 }
 
 func (e *Engine) processDebit(ev Event, acc *Account) {
@@ -223,7 +230,7 @@ func (e *Engine) processDebit(ev Event, acc *Account) {
 		EventID: ev.ID, Type: TypeDebit, Source: SourceInput,
 		Account: acc.ID, Amount: -ev.Amount, ValueDate: ev.ValueDate,
 	})
-
+	acc.Balance -= ev.Amount
 }
 
 // rawDailyInterestMicros computes one day's interest on a positive closing
@@ -248,13 +255,14 @@ func (e *Engine) capitalizeInterest(day int) {
 		}
 		trueTotal := RoundMicrosToMinorUnits(sumRawMicros)
 		remainder := trueTotal - sumRoundedMinor
-
+		feeID := fmt.Sprintf("SYS-INTEREST-CAP-%s", acc.ID)
 		acc.Ledger = append(acc.Ledger, LedgerEntry{
-			EventID: fmt.Sprintf("SYS-INTEREST-CAP-%s", acc.ID),
+			EventID: feeID,
 			Type:    TypeInterestCapitalization, Source: SourceSystem,
 			Account: acc.ID, Amount: sumRoundedMinor, ValueDate: day,
 			Reason: "Capitalization of daily interest accruals",
 		})
+		acc.Balance += sumRoundedMinor
 
 		if remainder != 0 {
 			acc.Ledger = append(acc.Ledger, LedgerEntry{
@@ -275,8 +283,8 @@ func (e *Engine) generateDayReport(day int) map[string]DayReport {
 			Day:              day,
 			Account:          account.ID,
 			Currency:         account.Currency,
-			ClosingBalance:   account.ClosingBalance(day),
-			AvailableBalance: account.AvailableBalance(day),
+			ClosingBalance:   account.Balance,
+			AvailableBalance: account.AvailableBalance(),
 			Holds:            account.GetAuthState(),
 			FeesAssessed:     account.FeesAssessed[day],
 			Errors:           account.Errors[day],
@@ -284,4 +292,13 @@ func (e *Engine) generateDayReport(day int) map[string]DayReport {
 		result[account.ID] = dayReport
 	}
 	return result
+}
+
+func (e *Engine) drainPending(day int) {
+	for _, acc := range e.Accounts {
+		if amt, ok := acc.PendingBalanceByDay[day]; ok {
+			acc.Balance += amt
+			delete(acc.PendingBalanceByDay, day)
+		}
+	}
 }

@@ -12,5 +12,8 @@
 
 2026-09-06 01:45 — Finish code, last checking with claude.ai help to ensure there's nothing skipped.
 
+2026-09-06 10:53 — updating the code for better efficiency.
+
+2026-09-06 11:30 — finishing improving efficiency.
 
 
